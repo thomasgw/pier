@@ -18,11 +18,13 @@ func (ex *Exchanger) listenIBTPFromDestAdaptForDirect(servicePair string) {
 		case <-ex.ctx.Done():
 			ex.logger.Info("ListenIBTPFromDestAdapt Stop!")
 			return
-		case ibtp, ok := <-ex.destIBTPMap[servicePair]:
+		case bIBTP, ok := <-ex.destIBTPMap[servicePair]:
 			if !ok {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			ibtp := bIBTP.Content
+			bIBTP.blocker <- struct{}{}
 			ex.logger.WithFields(logrus.Fields{"index": ibtp.Index, "type": ibtp.Type, "ibtp_id": ibtp.ID()}).Info("Receive ibtp from :", ex.destAdaptName)
 			index := ex.getCurrentIndexFromDest(ibtp)
 
@@ -67,11 +69,13 @@ func (ex *Exchanger) listenIBTPFromSrcAdaptForDirect(servicePair string) {
 		case <-ex.ctx.Done():
 			ex.logger.Info("ListenIBTPFromSrcAdapt Stop!")
 			return
-		case ibtp, ok := <-ex.srcIBTPMap[servicePair]:
+		case bIBTP, ok := <-ex.srcIBTPMap[servicePair]:
 			if !ok {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			ibtp := bIBTP.Content
+			bIBTP.blocker <- struct{}{}
 			ex.logger.WithFields(logrus.Fields{"index": ibtp.Index, "type": ibtp.Type, "ibtp_id": ibtp.ID()}).Info("Receive ibtp from :", ex.srcAdaptName)
 			index := ex.getCurrentIndexFromSrc(ibtp)
 			if index >= ibtp.Index {

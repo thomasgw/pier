@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Rican7/retry"
@@ -15,6 +16,11 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 )
+
+type BlockingIBTP struct {
+	Content *pb.IBTP
+	blocker chan interface{}
+}
 
 type Exchanger struct {
 	mode       string
@@ -30,14 +36,16 @@ type Exchanger struct {
 	srcServiceMeta  map[string]*pb.Interchain
 	destServiceMeta map[string]*pb.Interchain
 
-	srcIBTPMap  map[string]chan *pb.IBTP
-	destIBTPMap map[string]chan *pb.IBTP
+	srcIBTPMap  map[string]chan *BlockingIBTP
+	destIBTPMap map[string]chan *BlockingIBTP
 
 	sendIBTPCounter atomic.Uint64
 	sendIBTPTimer   atomic.Duration
 	logger          logrus.FieldLogger
 	ctx             context.Context
 	cancel          context.CancelFunc
+
+	blockerPool *sync.Pool
 }
 
 func New(typ, srcChainId, srcBxhId string, opts ...Option) (*Exchanger, error) {
@@ -52,11 +60,12 @@ func New(typ, srcChainId, srcBxhId string, opts ...Option) (*Exchanger, error) {
 		logger:          config.logger,
 		srcServiceMeta:  make(map[string]*pb.Interchain),
 		destServiceMeta: make(map[string]*pb.Interchain),
-		srcIBTPMap:      make(map[string]chan *pb.IBTP),
-		destIBTPMap:     make(map[string]chan *pb.IBTP),
+		srcIBTPMap:      make(map[string]chan *BlockingIBTP),
+		destIBTPMap:     make(map[string]chan *BlockingIBTP),
 		mode:            typ,
 		ctx:             ctx,
 		cancel:          cancel,
+		blockerPool:     &sync.Pool{New: func() any { return make(chan interface{}, 1) }},
 	}
 	return exchanger, nil
 }
@@ -186,10 +195,15 @@ func (ex *Exchanger) listenIBTPFromDestAdaptToServicePairCh() {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			blocker := ex.blockerPool.Get().(chan interface{})
+			bIBTP := &BlockingIBTP{
+				Content: ibtp,
+				blocker: blocker,
+			}
 			key := ibtp.From + ibtp.To
 			_, ok2 := ex.destIBTPMap[key]
 			if !ok2 {
-				ex.destIBTPMap[key] = make(chan *pb.IBTP, 40960)
+				ex.destIBTPMap[key] = make(chan *BlockingIBTP, 40960)
 				if strings.EqualFold(repo.RelayMode, ex.mode) {
 					go ex.listenIBTPFromDestAdaptForRelay(key)
 				} else if strings.EqualFold(repo.DirectMode, ex.mode) {
@@ -198,8 +212,9 @@ func (ex *Exchanger) listenIBTPFromDestAdaptToServicePairCh() {
 					go ex.listenIBTPFromDestAdapt(key)
 				}
 			}
-			ex.destIBTPMap[key] <- ibtp
-
+			ex.destIBTPMap[key] <- bIBTP
+			<-bIBTP.blocker
+			ex.blockerPool.Put(bIBTP.blocker)
 		}
 	}
 }
@@ -209,11 +224,13 @@ func (ex *Exchanger) listenIBTPFromDestAdapt(servicePair string) {
 		case <-ex.ctx.Done():
 			ex.logger.Info("ListenIBTPFromDestAdapt Stop!")
 			return
-		case ibtp, ok := <-ex.destIBTPMap[servicePair]:
+		case bIBTP, ok := <-ex.destIBTPMap[servicePair]:
 			if !ok {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			ibtp := bIBTP.Content
+			bIBTP.blocker <- struct{}{}
 			ex.logger.WithFields(logrus.Fields{"index": ibtp.Index, "type": ibtp.Type, "ibtp_id": ibtp.ID()}).Info("Receive ibtp from :", ex.destAdaptName)
 			index := ex.getCurrentIndexFromDest(ibtp)
 			if index >= ibtp.Index {
@@ -264,10 +281,15 @@ func (ex *Exchanger) listenIBTPFromSrcAdaptToServicePairCh() {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			blocker := ex.blockerPool.Get().(chan interface{})
+			bIBTP := &BlockingIBTP{
+				Content: ibtp,
+				blocker: blocker,
+			}
 			key := ibtp.From + ibtp.To
 			_, ok2 := ex.srcIBTPMap[key]
 			if !ok2 {
-				ex.srcIBTPMap[key] = make(chan *pb.IBTP, 40960)
+				ex.srcIBTPMap[key] = make(chan *BlockingIBTP, 40960)
 				if strings.EqualFold(repo.RelayMode, ex.mode) {
 					go ex.listenIBTPFromSrcAdaptForRelay(key)
 				} else if strings.EqualFold(repo.DirectMode, ex.mode) {
@@ -276,8 +298,9 @@ func (ex *Exchanger) listenIBTPFromSrcAdaptToServicePairCh() {
 					go ex.listenIBTPFromSrcAdapt(key)
 				}
 			}
-			ex.srcIBTPMap[key] <- ibtp
-
+			ex.srcIBTPMap[key] <- bIBTP
+			<-bIBTP.blocker
+			ex.blockerPool.Put(bIBTP.blocker)
 		}
 	}
 }
@@ -287,11 +310,13 @@ func (ex *Exchanger) listenIBTPFromSrcAdapt(servicePair string) {
 		case <-ex.ctx.Done():
 			ex.logger.Info("ListenIBTPFromSrcAdapt Stop!")
 			return
-		case ibtp, ok := <-ex.srcIBTPMap[servicePair]:
+		case bIBTP, ok := <-ex.srcIBTPMap[servicePair]:
 			if !ok {
 				ex.logger.Warn("Unexpected closed channel while listening on interchain ibtp")
 				return
 			}
+			ibtp := bIBTP.Content
+			bIBTP.blocker <- struct{}{}
 			ex.logger.WithFields(logrus.Fields{"index": ibtp.Index, "type": ibtp.Type, "ibtp_id": ibtp.ID()}).Info("Receive ibtp from :", ex.srcAdaptName)
 			index := ex.getCurrentIndexFromSrc(ibtp)
 			if index >= ibtp.Index {
