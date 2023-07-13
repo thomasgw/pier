@@ -154,6 +154,8 @@ func (b *BxhAdapter) SendIBTP(ibtp *pb.IBTP) error {
 	)
 	if err := retry.Retry(func(attempt uint) error {
 		hash, err := b.client.SendTransaction(tx, nil)
+		b.logger.Infof("send transaction[%s] to bxh with hash: %s, account: %s, nonce: %d",
+			tx.Hash().String(), tx.From.String(), tx.Nonce)
 		if err != nil {
 			b.logger.Errorf("Send ibtp error: %s", err.Error())
 			if errors.Is(err, rpcx.ErrRecoverable) {
@@ -173,12 +175,15 @@ func (b *BxhAdapter) SendIBTP(ibtp *pb.IBTP) error {
 		if err := retry.Retry(func(attempt uint) error {
 			receipt, err = b.client.GetReceipt(hash)
 			if err != nil {
+				b.logger.Errorf("get receipt for tx %s error: %s", tx.Hash().String(), err.Error())
 				return fmt.Errorf("get tx receipt by hash %s: %w", hash, err)
 			}
 			return nil
 		}, strategy.Wait(1*time.Second)); err != nil {
 			b.logger.Errorf("retry error to get receipt: %w", err)
 		}
+		b.logger.Infof("send transaction[%s] to bxh with hash: %s, account: %s, nonce: %d got receipt[success: %v]",
+			tx.Hash().String(), tx.From.String(), tx.Nonce, receipt.IsSuccess())
 
 		// most err occur in bxh's handleIBTP
 		if !receipt.IsSuccess() {
